@@ -535,9 +535,11 @@ func isSourceEditorWindow(titleLower string) bool {
 
 // hasGPUTraceUI checks whether a window contains GPU trace UI elements
 // (Replay, Profile, Export, or Show Performance buttons).
+// Uses ...Loose lookup so Xcode 26's "Profile..." / "Profile…" labels still
+// register as a hit.
 func hasGPUTraceUI(windowAX uintptr) bool {
 	for _, name := range []string{"Replay", "Profile", "Export", "Show Performance"} {
-		if btn := findButtonBFS(windowAX, name, 500); btn != 0 {
+		if btn := findButtonBFSLoose(windowAX, name, 500); btn != 0 {
 			return true
 		}
 	}
@@ -649,14 +651,24 @@ func clickReplayButton(windowAX uintptr) error {
 		return nil
 	}
 
-	// Try "Profile" button in target window
-	profileBtn := findButtonBFS(windowAX, "Profile", 500)
+	// Try "Profile" button in target window — Xcode 26 labels this
+	// "Profile..." (or "Profile…", U+2026) because clicking it opens a
+	// "Start new session" popover instead of starting the profile directly.
+	// findButtonBFSLoose accepts either label form.
+	profileBtn := findButtonBFSLoose(windowAX, "Profile", 500)
 	verboseLog("clickReplayButton: Profile button=%d enabled=%v", profileBtn, profileBtn != 0 && IsElementEnabled(profileBtn))
 	if profileBtn != 0 && IsElementEnabled(profileBtn) {
 		if err := axPressWithFallbackWindow(profileBtn, windowAX); err != nil {
 			return fmt.Errorf("failed to click Profile button: %w", err)
 		}
 		fmt.Println("    Clicked Profile button successfully")
+
+		// If Xcode opened a "Start new session" popover, confirm it. On
+		// older Xcode versions this returns false (no popover) and the
+		// outer click was the whole action — either way we're done.
+		if handleProfilePopover(windowAX) {
+			fmt.Println("    Confirmed Start new session popover")
+		}
 		return nil
 	}
 

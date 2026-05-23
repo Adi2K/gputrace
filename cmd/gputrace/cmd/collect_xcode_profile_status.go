@@ -174,25 +174,28 @@ func getProfilingStatusWithDebug(window uintptr, debug bool) string {
 			}
 		}
 
-		// Check for Replay and Profile buttons
+		// Check for Replay and Profile buttons.
+		// Xcode 26 renders "Profile" as "Profile..." or "Profile…" because
+		// the click opens a "Start new session" popover; matchButtonName
+		// accepts all three forms.
 		if role == "AXButton" {
 			buttonsFound++
 			name := axString(el, "AXTitle")
 			if name == "" {
 				name = axString(el, "AXDescription")
 			}
-			switch name {
-			case "Replay":
+			switch {
+			case matchButtonName(name, "Replay"):
 				hasReplay = true
 				replayEnabled = IsElementEnabled(el)
 				if debug {
-					fmt.Printf("[DEBUG] Found Replay button (enabled=%v)\n", replayEnabled)
+					fmt.Printf("[DEBUG] Found Replay button (title=%q enabled=%v)\n", name, replayEnabled)
 				}
-			case "Profile":
+			case matchButtonName(name, "Profile"):
 				hasProfile = true
 				profileEnabled = IsElementEnabled(el)
 				if debug {
-					fmt.Printf("[DEBUG] Found Profile button (enabled=%v)\n", profileEnabled)
+					fmt.Printf("[DEBUG] Found Profile button (title=%q enabled=%v)\n", name, profileEnabled)
 				}
 			}
 		}
