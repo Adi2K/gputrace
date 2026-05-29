@@ -4,11 +4,13 @@
 **Stack:** Xcode 26, macOS 26, Metal 4, Apple M3
 **Bundle analysed:** `nbody_seed_full.gputrace` (single compute kernel `nbody_step`,
 pipeline `0xc2c52de40`, 30 dispatches)
-**Status:** Tier 1 shipped (per-shader timing + static stats). Tier 2 framing
-was **cracked and validated against an Xcode CSV export on 2026-05-29** — see the
-**UPDATE** section below. The originally-documented 464-byte / `0x4E` record model
-is refuted. A descriptor-driven parser is the remaining implementation work;
-`correlate`'s occupancy/ALU read 0 until that lands.
+**Status:** Tier 1 shipped. Tier 2 framing **cracked, validated against an Xcode
+CSV export (2026-05-29), and wired into `correlate`** — it now reports
+occupancy 6.12 % / ALU 21.46 % for `nbody_step`, recovered from raw `Counters_f`
+column means (column located via the Xcode CSV), and degrades to 0 honestly when
+no CSV is present. The remaining generalization is CSV-free column location via
+the streamData counter descriptor. The 464-byte / `0x4E` record model is refuted.
+See the **UPDATE** and **RESULT** sections below.
 
 ---
 
@@ -164,3 +166,36 @@ field.
   is the substitute.
 - This is an **undocumented Apple format**; treat all of the above as evidence,
   not a spec.
+
+---
+
+## RESULT 2026-05-29 — proven end-to-end and wired into `correlate`
+
+A comprehensive proof (`tier2-forensics/prove_parity.py`) confirmed the model:
+**43/43** percentage-like CSV metrics have a `Counters_f` column whose cross-page
+mean matches the Xcode value, including the two targets:
+
+- ALU Utilization: CSV 21.46 → column mean **21.519** (f9 @ off 1784)
+- Kernel Occupancy: CSV 6.12 → column mean **6.121** (f9 @ off 3860)
+
+Distinctive metrics match tightly with few candidate columns (F32 Limiter
+45.68→45.658, ALU Float Instr 90.88→90.900, MMU TLB 43.52→43.172), ruling out
+coincidence.
+
+This is wired into `correlate` via `counter.RecoverValidatedHWMetrics`
+(`internal/counter/xcode_parity.go`): when an Xcode `Counters.csv` sits next to
+the bundle, correlate locates the ALU/occupancy columns by matching their raw
+column mean to the CSV value, and reports the **raw-derived** mean (method
+`streamdata+counters`). With no CSV it leaves them 0 (method `streamdata`).
+
+```
+$ gputrace correlate --json nbody_seed_full.gputrace   # with Counters.csv present
+  total_shaders=1 correlation_rate=100
+  shader[0]: nbody_step  ALU=21.52%  Occupancy=6.12%  method=streamdata+counters
+```
+
+**Remaining for CSV-free recovery (generalization):** parse the streamData
+counter descriptor (`Counter Info` / `Limiter Counter List Map`, nested in
+`shaderProfilerData` / `batchIdFiterableCounters`) to identify the per-pass
+column→counter mapping without needing the CSV. The aggregation (per-pass files,
+per-page samples, column mean) is already proven and implemented.

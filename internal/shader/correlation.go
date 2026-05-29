@@ -12,11 +12,7 @@ import (
 )
 
 // Type aliases
-type (
-	Trace                 = trace.Trace
-	PerfCounterStats      = counter.PerfCounterStats
-	ShaderHardwareMetrics = counter.ShaderHardwareMetrics
-)
+type Trace = trace.Trace
 
 // CorrelatedShaderMetrics combines timing data with hardware performance metrics.
 type CorrelatedShaderMetrics struct {
@@ -102,12 +98,14 @@ func CorrelateShaderMetrics(trace *Trace) (*ShaderCorrelationReport, error) {
 		return report, nil
 	}
 
-	// Best-effort hardware enrichment, matched by readable shader name. Empty or
-	// zero hardware (the current Xcode-26 case) simply leaves ALU/occupancy at 0.
-	hardwareMap := map[string]*ShaderHardwareMetrics{}
-	if perfStats, perfErr := counter.ParsePerfCounters(trace); perfErr == nil && perfStats != nil {
-		hardwareMap = buildHardwareMap(perfStats)
-	}
+	// Validated hardware enrichment: recover ALU utilization + kernel occupancy
+	// from the raw Counters_f sample columns, locating the correct (multiplexed)
+	// column by matching its cross-sample mean to the Xcode Counters.csv ground
+	// truth when that export is present next to the bundle. Absent a CSV this is
+	// empty and ALU/occupancy stay 0 (until the streamData counter descriptor is
+	// parsed for CSV-free column identification). See
+	// docs/research/COUNTERS_F_XCODE26_FRAMING.md.
+	validatedHW, _ := counter.RecoverValidatedHWMetrics(trace, profilerDir)
 
 	// One correlated record per pipeline (shader), aggregating its dispatches.
 	for i := range sd.Pipelines {
@@ -145,22 +143,12 @@ func CorrelateShaderMetrics(trace *Trace) (*ShaderCorrelationReport, error) {
 			merged.AvgDuration = total / time.Duration(execCount)
 		}
 
-		// Enrich with hardware counters when present (non-zero ALU = real data).
-		if hw, ok := hardwareMap[p.FunctionName]; ok && hw.ALUUtilization > 0 {
-			merged.ALUUtilization = hw.ALUUtilization
-			merged.KernelOccupancy = hw.KernelOccupancy
-			merged.SIMDGroups = hw.SIMDGroups
-			merged.MemoryBandwidth = hw.MemoryBandwidth
-			merged.TotalCycles = hw.TotalCycles
-			merged.CorrelationMethod = "streamdata+hw"
-
-			if merged.ExecutionCount > 0 {
-				merged.CyclesPerInvocation = merged.TotalCycles / uint64(merged.ExecutionCount)
-			}
-			if merged.AvgDuration.Nanoseconds() > 0 {
-				avgCycles := float64(merged.TotalCycles) / float64(merged.ExecutionCount)
-				merged.EstimatedGPUFreqGHz = avgCycles / merged.AvgDuration.Seconds() / 1e9
-			}
+		// Enrich with validated ALU utilization + kernel occupancy (Counters_f
+		// column means, located via the Xcode CSV). Stays 0 when no CSV present.
+		if v, ok := validatedHW[p.FunctionName]; ok {
+			merged.ALUUtilization = v.ALUUtilization
+			merged.KernelOccupancy = v.KernelOccupancy
+			merged.CorrelationMethod = "streamdata+counters"
 		}
 
 		report.Shaders = append(report.Shaders, merged)
@@ -199,16 +187,6 @@ func findProfilerDir(tracePath string) string {
 		}
 	}
 	return sibling
-}
-
-// buildHardwareMap creates a map of shader name -> hardware metrics.
-func buildHardwareMap(stats *PerfCounterStats) map[string]*ShaderHardwareMetrics {
-	hardwareMap := make(map[string]*ShaderHardwareMetrics)
-	for i := range stats.ShaderMetrics {
-		metric := &stats.ShaderMetrics[i]
-		hardwareMap[metric.ShaderName] = metric
-	}
-	return hardwareMap
 }
 
 // calculateCorrelationSummary computes summary statistics for the correlation report.
