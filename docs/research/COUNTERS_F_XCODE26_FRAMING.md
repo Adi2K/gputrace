@@ -4,9 +4,74 @@
 **Stack:** Xcode 26, macOS 26, Metal 4, Apple M3
 **Bundle analysed:** `nbody_seed_full.gputrace` (single compute kernel `nbody_step`,
 pipeline `0xc2c52de40`, 30 dispatches)
-**Status:** the documented sample-record model does **not** hold on this stack;
-occupancy + ALU-utilization (`correlate` axes 16–17) are **not yet recoverable**
-and read 0. Per-shader timing + static stats *are* recovered (Tier 1, shipped).
+**Status:** Tier 1 shipped (per-shader timing + static stats). Tier 2 framing
+was **cracked and validated against an Xcode CSV export on 2026-05-29** — see the
+**UPDATE** section below. The originally-documented 464-byte / `0x4E` record model
+is refuted. A descriptor-driven parser is the remaining implementation work;
+`correlate`'s occupancy/ALU read 0 until that lands.
+
+---
+
+## UPDATE 2026-05-29 — framing cracked (Xcode CSV ground truth)
+
+With an Xcode `Counters.csv` export for this bundle as ground truth
+(`gputrace xcode-counters`: ALU Utilization **21.46 %**, Kernel Occupancy
+**6.12 %**, 242 metrics over 1 encoder), the aggregation model is now understood
+and **self-validates**:
+
+- **Each `Counters_f_N.raw` is one counter PASS** (hardware counter
+  multiplexing — the GPU can't sample all counters at once, hence 10 files).
+- **Each 4096-byte page is one SAMPLE.**
+- **Each counter is a fixed COLUMN** (a page-relative float32 offset) within a
+  file's pages.
+- **The Xcode per-encoder value = the MEAN of that column across all samples
+  (pages).**
+
+Fitting column-means to the CSV produced near-exact matches — far too tight to be
+coincidence (`experiments/gputrace-probe/tier2-forensics/column_fit.py`):
+
+| Counter (CSV)                    | CSV value | column-mean | location        |
+|----------------------------------|-----------|-------------|-----------------|
+| Instruction Throughput Util      | 11.75     | **11.746**  | f0 @ off 1784   |
+| F32 Limiter                      | 45.68     | **45.658**  | f0 @ off 2212   |
+| ALU Float Instructions           | 90.88     | **90.900**  | f3 @ off 3944   |
+| F32 Utilization                  | 39.01     | 39.04–39.12 | f1/f6           |
+| ALU Utilization                  | 21.46     | 21.5–21.6   | f3 @ 3312 / f9  |
+| Kernel Occupancy                 | 6.12      | ~6.12       | several         |
+
+Occupancy also shows up as direct per-sample float32 values clustering at
+6.108–6.138 % (`parity_search.py`), confirming it is a stored per-sample %.
+`Kernel Invocations` (61440) is a rock-solid exact uint32 anchor at consistent
+offsets across all 10 files.
+
+### What blocks a *robust* (general) parser
+
+The column→counter mapping is **multiplexed**: the same page-relative offset
+holds different counters in different passes (e.g. offset 1784 averages to ~11.75
+in files 0/4/7 but ~21.5 in file 9). So you cannot hardcode offsets. The mapping
+is defined by a descriptor **inside streamData** — `strings streamData` shows
+`"Limiter Counter List Map"`, `"limiter sample counters"`, `"Counter Info"`,
+`"Uarch Enabled"`. The friendly names ("ALU Utilization", …) are **not** in the
+bundle (Xcode derives/labels them), so the descriptor uses Apple uarch counter
+identifiers.
+
+### Remaining implementation (next step)
+
+1. Parse streamData's `Counter Info` / `Limiter Counter List Map` to get the
+   ordered counter list per pass → column offsets per `Counters_f_N`.
+2. For each counter column, average the float32 across all sample pages → the
+   per-encoder value (matches Xcode CSV).
+3. Map the uarch/limiter counters to the friendly metrics needed by
+   `ShaderHardwareMetrics` (`ALUUtilization`, `KernelOccupancy`); verify against
+   a CSV export before trusting (do **not** ship fit-to-CSV offsets — they don't
+   generalize across traces/passes).
+4. Wire into `ParsePerfCounters`; `correlate` then shows `streamdata+hw`.
+
+This replaces the old range-based float search (Method 2 in
+`FIELD_OFFSET_QUICK_REFERENCE.md`), which fails on Xcode-26 because the values
+are means over multiplexed per-sample columns, not single in-range floats.
+
+---
 
 ## TL;DR
 
