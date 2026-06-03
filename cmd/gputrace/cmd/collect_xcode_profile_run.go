@@ -655,6 +655,39 @@ func clickReplayButton(windowAX uintptr) error {
 	// "Profile..." (or "Profile…", U+2026) because clicking it opens a
 	// "Start new session" popover instead of starting the profile directly.
 	// findButtonBFSLoose accepts either label form.
+	//
+	// IMPORTANT (Xcode 26.5): there are TWO different "Profile" buttons:
+	//   - The Summary inspector's "Profile" (AXDescription="Profile", NO
+	//     ellipsis) RE-PROFILES DIRECTLY at the default state — no popover.
+	//   - The Performance view's "Profile…" (AXTitle, WITH ellipsis) opens the
+	//     "Start new session" popover that carries the Performance State
+	//     dropdown.
+	// When the caller wants a specific Performance State (METALOPTIM_GPU_STATE),
+	// we must click the ellipsis one. Switch the editor Jump Bar to the
+	// Performance view first (deterministic; `xp navigator performance` alone
+	// is flaky about switching the editor on 26.5), which surfaces "Profile…".
+	wantState := os.Getenv("METALOPTIM_GPU_STATE")
+	if wantState != "" {
+		if ensureGPUTraceJumpBarView(windowAX, "Performance") {
+			if ellipsisBtn := findEllipsisProfileButton(windowAX, 4000); ellipsisBtn != 0 && IsElementEnabled(ellipsisBtn) {
+				verboseLog("clickReplayButton: clicking Performance-view 'Profile…' (popover) button for state=%s", wantState)
+				// Background-only press: the foreground fallback would raise
+				// Xcode and can dismiss/garble the popover before we drive it.
+				if err := axPressBackground(ellipsisBtn); err != nil {
+					return fmt.Errorf("failed to click Profile… button: %w", err)
+				}
+				fmt.Println("    Clicked Profile… button successfully")
+				if handleProfilePopover(windowAX) {
+					fmt.Println("    Confirmed Start new session popover")
+				} else {
+					fmt.Println("    Note: Profile… popover not confirmed; profiled at default state")
+				}
+				return nil
+			}
+			verboseLog("clickReplayButton: 'Profile…' button not found in Performance view, falling back")
+		}
+	}
+
 	profileBtn := findButtonBFSLoose(windowAX, "Profile", 500)
 	verboseLog("clickReplayButton: Profile button=%d enabled=%v", profileBtn, profileBtn != 0 && IsElementEnabled(profileBtn))
 	if profileBtn != 0 && IsElementEnabled(profileBtn) {
@@ -1057,9 +1090,24 @@ func dumpExportSheetState(windowAX uintptr) {
 }
 
 func exportTrace(appAX, windowAX uintptr, outputPath string) error {
-	activateXcodeQuick()
-	axAction(windowAX, "AXRaise")
+	activateXcodeQuick() // no-op under --background
+	// AXRaise surfaces the trace window onto the screen (even without focusing
+	// Xcode). Under --background, skip it so nothing pops up over the user's
+	// work; AX actions on the export sheet work without raising the window.
+	if !collectProfileBackground {
+		axAction(windowAX, "AXRaise")
+	}
 	time.Sleep(300 * time.Millisecond)
+
+	// The Export button lives in the Summary view. After a Performance-State
+	// popover profile (METALOPTIM_GPU_STATE path) the editor Jump Bar is left
+	// on the Performance view, where there is no Export button. Switch back to
+	// Summary first so FindExportButton succeeds. Best-effort; harmless if
+	// already on Summary or if no Jump Bar popup exists.
+	if FindExportButton(windowAX) == 0 {
+		ensureGPUTraceJumpBarView(windowAX, "Summary")
+		time.Sleep(300 * time.Millisecond)
+	}
 
 	// Try clicking Export button in Summary panel first
 	exportBtn := FindExportButton(windowAX)
